@@ -18,55 +18,77 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	// Initialize the database
-	log.Println("Init DB")
-
+	log.Println("Initializing database connection...")
 	db.InitDB()
 	defer db.DB.Close()
-	log.Println("Defere DB")
 
 	// Create a new router
 	r := mux.NewRouter()
-	log.Println("Routers Start")
+
+	// Apply rate limiting middleware globally
+	r.Use(auth.RateLimitMiddleware)
 
 	// Health check endpoint
 	r.HandleFunc("/health", healthHandler).Methods("GET")
 
-	// Public routes
+	// Public routes (no authentication required)
 	r.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
 		handlers.LoginHandler(w, r, db.DB)
 	}).Methods("POST")
 	r.HandleFunc("/register", handlers.RegisterUser).Methods("POST")
-	r.HandleFunc("/logout", handlers.LogoutHandler).Methods("POST") // Add this for logout
+	r.HandleFunc("/logout", handlers.LogoutHandler).Methods("POST")
+
+	// Password reset routes
+	r.HandleFunc("/request-password-reset", func(w http.ResponseWriter, r *http.Request) {
+		handlers.ForgotPasswordHandler(w, r, db.DB)
+	}).Methods("POST")
+	r.HandleFunc("/reset-password", func(w http.ResponseWriter, r *http.Request) {
+		handlers.ResetPasswordHandler(w, r, db.DB)
+	}).Methods("POST")
+
+	// Email verification webhook
+	r.HandleFunc("/webhooks/verify-email", func(w http.ResponseWriter, r *http.Request) {
+		handlers.VerifyEmailHandler(w, r, db.DB)
+	}).Methods("GET")
+	r.HandleFunc("/webhooks/resend-email", handlers.ResendVerificationHandler).Methods("POST")
 
 	// Secure routes with JWT middleware
 	secure := r.PathPrefix("/api").Subrouter()
-	// Apply rate limiting to public routes
-	r.Use(auth.RateLimitMiddleware)
 	secure.Use(func(next http.Handler) http.Handler {
-		return auth.AuthMiddleware(next, db.DB) // Wrap AuthMiddleware to match mux.MiddlewareFunc
+		return auth.AuthMiddleware(next, db.DB)
 	})
 
+	// User routes
 	secure.HandleFunc("/user/{id}", handlers.GetUserDetails).Methods("GET")
-	secure.HandleFunc("/userinfo", handlers.GetUserDetails).Methods("GET") // 👈 This is the fix
+	secure.HandleFunc("/userinfo", handlers.GetUserDetails).Methods("GET")
 	secure.HandleFunc("/user", handlers.UpdateUserDetailsHandler).Methods("PUT")
 	secure.HandleFunc("/user/tenant/{tenant_id}", handlers.GetUsersByTenant).Methods("GET")
 	secure.HandleFunc("/user/{id}", handlers.DeleteUserHandler).Methods("DELETE")
+	secure.HandleFunc("/user", handlers.RegisterUserAgainstTenantId).Methods("POST")
 
+	// Team routes
 	secure.HandleFunc("/team", handlers.GetTeamsByTenantHandler).Methods("GET")
 	secure.HandleFunc("/team", handlers.CreateOrUpdateTeamHandler).Methods("POST", "PUT")
 	secure.HandleFunc("/team/{id}", handlers.DeleteTeamHandler).Methods("DELETE")
 
-	r.PathPrefix("/api").Handler(secure)
-	log.Println("Routers End")
+	// Module routes
+	secure.HandleFunc("/modules", handlers.GetModulesHandler).Methods("GET")
 
-	log.Println("Sentinel starting on :8080")
-	handler := auth.EnableCORS(r) // ✅ wrap router with CORS middleware
+	r.PathPrefix("/api").Handler(secure)
+
+	// Log all registered routes
+	log.Println("Registered routes:")
 	r.Walk(func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
 		pathTemplate, _ := route.GetPathTemplate()
 		methods, _ := route.GetMethods()
-		log.Printf("Registered route: %s %v\n", pathTemplate, methods)
+		if pathTemplate != "" {
+			log.Printf("  %s %v\n", pathTemplate, methods)
+		}
 		return nil
 	})
-	log.Fatal(http.ListenAndServe(":8080", handler))
 
+	// Start server with CORS middleware
+	log.Println("Sentinel starting on :8080")
+	handler := auth.EnableCORS(r)
+	log.Fatal(http.ListenAndServe(":8080", handler))
 }

@@ -37,37 +37,86 @@ func AuthMiddleware(next http.Handler, dbInstance *sql.DB) http.Handler {
 
 		// Extract token
 		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-		claims, err := ValidateToken(tokenStr) // Ensure ValidateToken is implemented and imported
+		claims, err := ValidateToken(tokenStr)
 		if err != nil {
-			log.Println("Middleware error")
-			log.Println(err)
+			log.Println("JWT validation failed:", err)
 			http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
 			return
 		}
 
-		var exists bool
-		x := dbInstance.QueryRow("SELECT EXISTS(SELECT 1 FROM token_blacklist WHERE token=$1)", tokenStr).Scan(&exists)
-		if x != nil || exists {
-			log.Printf("Printing token 2 %s", tokenStr)
-			http.Error(w, "Token is invalid", http.StatusUnauthorized)
+		// Check if token is blacklisted
+		var blacklisted bool
+		err = dbInstance.QueryRow("SELECT EXISTS(SELECT 1 FROM token_blacklist WHERE token=$1)", tokenStr).Scan(&blacklisted)
+		if err != nil || blacklisted {
+			log.Println("Token blacklisted or error:", err)
+			http.Error(w, "Token is invalid or blacklisted", http.StatusUnauthorized)
 			return
 		}
 
-		// Add claims to request context
-		ctx := r.Context()
-		ctx = context.WithValue(ctx, EmailKey, claims.Email)
+		// Check if user still exists
+		var userExists bool
+		err = dbInstance.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE email=$1 AND tenant_id=$2)", claims.Email, claims.TenantID).Scan(&userExists)
+		if err != nil || !userExists {
+			log.Println("User not found or error:", err)
+			http.Error(w, "User does not exist", http.StatusUnauthorized)
+			return
+		}
+
+		// Check email verification if enabled (set REQUIRE_EMAIL_VERIFICATION=true to enable)
+		if os.Getenv("REQUIRE_EMAIL_VERIFICATION") == "true" {
+			var confirmed bool
+			err = dbInstance.QueryRow("SELECT COALESCE(email_confirmed, false) FROM users WHERE email=$1 AND tenant_id=$2", claims.Email, claims.TenantID).Scan(&confirmed)
+			if err != nil || !confirmed {
+				log.Println("Email not verified")
+				http.Error(w, "Please verify your email before accessing the application", http.StatusForbidden)
+				return
+			}
+		}
+
+		// Enforce single-session login if enabled (set SINGLE_SESSION=true to enable)
+		if os.Getenv("SINGLE_SESSION") == "true" {
+			var dbToken, dbIP string
+			err = dbInstance.QueryRow("SELECT token, last_ip FROM active_sessions WHERE email=$1 AND tenant_id=$2", claims.Email, claims.TenantID).Scan(&dbToken, &dbIP)
+			if err != nil {
+				log.Println("Active session not found:", err)
+				http.Error(w, "Session not found or user logged in elsewhere", http.StatusUnauthorized)
+				return
+			}
+
+			if dbToken != tokenStr {
+				// Blacklist the old token
+				_, _ = dbInstance.Exec("INSERT INTO token_blacklist (token) VALUES ($1) ON CONFLICT DO NOTHING", dbToken)
+
+				// Update active session with new token
+				var ip string
+				if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+					ip = strings.Split(forwarded, ",")[0]
+				} else {
+					ip, _, _ = strings.Cut(r.RemoteAddr, ":")
+				}
+				_, _ = dbInstance.Exec(`
+					UPDATE active_sessions SET token=$1, last_ip=$2, updated_at=NOW()
+					WHERE email=$3 AND tenant_id=$4
+				`, tokenStr, ip, claims.Email, claims.TenantID)
+
+				log.Println("Token mismatch, previous session logged out")
+			}
+		}
+
+		// Attach claims to context
+		ctx := context.WithValue(r.Context(), EmailKey, claims.Email)
 		ctx = context.WithValue(ctx, TenantIDKey, claims.TenantID)
-		ctx = context.WithValue(ctx, RoleKey, claims.Role) // Add this line to store role in context
+		ctx = context.WithValue(ctx, RoleKey, claims.Role)
 		r = r.WithContext(ctx)
 
-		// Proceed to the next handler
+		// Continue to handler
 		next.ServeHTTP(w, r)
 	})
 }
 
 // GetTenantID fetches the tenant_id from the context
 func GetTenantID(ctx context.Context) (int, error) {
-	tenantIDValue := ctx.Value(TenantIDKey) // Fetch from context using tenantIDKey
+	tenantIDValue := ctx.Value(TenantIDKey)
 	tenantID, ok := tenantIDValue.(int)
 
 	if !ok {
@@ -77,13 +126,9 @@ func GetTenantID(ctx context.Context) (int, error) {
 	return tenantID, nil
 }
 
-// GetRole retrieves the user's role from the context.
-// Replace this stub with your actual implementation as needed.
+// GetRole retrieves the user's role from the context
 func GetRole(ctx context.Context) (string, error) {
-	// Print all known context keys and their values for debugging
-
 	role := ctx.Value(RoleKey)
-
 	roleValue, ok := role.(string)
 	if !ok {
 		log.Println("Error: role not found in context or invalid type")
@@ -94,7 +139,7 @@ func GetRole(ctx context.Context) (string, error) {
 
 // GetEmail fetches the email from the context
 func GetEmail(ctx context.Context) (string, error) {
-	emailValue := ctx.Value(EmailKey) // Fetch from context using emailKey
+	emailValue := ctx.Value(EmailKey)
 	email, ok := emailValue.(string)
 
 	if !ok {
@@ -116,11 +161,10 @@ func getUserLimiter(user string) *rate.Limiter {
 
 	limiter, exists := userLimiters[user]
 	if !exists {
-		// Fetch rate limit configuration from environment variables or a config file
-		rateLimit := 1  // Default to 1 request per second
-		burstLimit := 3 // Default to a burst of 3 requests
+		// Fetch rate limit configuration from environment variables
+		rateLimit := 100
+		burstLimit := 300
 
-		// Example: Fetch from environment variables (you can replace this with your config logic)
 		if rl, ok := os.LookupEnv("RATE_LIMIT"); ok {
 			if parsedRate, err := strconv.Atoi(rl); err == nil {
 				rateLimit = parsedRate
@@ -141,11 +185,20 @@ func getUserLimiter(user string) *rate.Limiter {
 // RateLimitMiddleware applies rate limiting per user
 func RateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Use the Authorization header as the user identifier
-		if r.URL.Path == "/health" || r.URL.Path == "/register" || r.URL.Path == "/login" || r.URL.Path == "/logout" {
+		// Skip rate limiting for public endpoints
+		publicPaths := []string{"/health", "/register", "/login", "/logout", "/request-password-reset", "/reset-password"}
+		for _, path := range publicPaths {
+			if r.URL.Path == path {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		// Skip webhooks
+		if strings.HasPrefix(r.URL.Path, "/webhooks/") {
 			next.ServeHTTP(w, r)
 			return
 		}
+
 		// Extract user identifier from the Authorization header
 		user := r.Header.Get("Authorization")
 		if user == "" {
@@ -163,12 +216,37 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// getAllowedOrigins returns the list of allowed CORS origins from environment
+func getAllowedOrigins() map[string]bool {
+	origins := map[string]bool{
+		"http://localhost:5173": true, // Default for local development
+		"http://localhost:3000": true,
+	}
+
+	// Add custom origins from environment variable (comma-separated)
+	if customOrigins := os.Getenv("CORS_ALLOWED_ORIGINS"); customOrigins != "" {
+		for _, origin := range strings.Split(customOrigins, ",") {
+			origins[strings.TrimSpace(origin)] = true
+		}
+	}
+
+	return origins
+}
+
+// EnableCORS adds CORS headers to responses
 func EnableCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
+		origin := r.Header.Get("Origin")
+		allowedOrigins := getAllowedOrigins()
+
+		if allowedOrigins[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		if r.Method == "OPTIONS" {
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
 		}

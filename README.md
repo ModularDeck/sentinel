@@ -1,293 +1,376 @@
-# ModSentinelDeck
+# Sentinel
 
-🚀 **Mod-Sentinel-Deck** is a modular, multi-tenant ready user management system written in Go. It acts as a guardian for your user data.
+A modular, multi-tenant user management system written in Go. Sentinel provides a complete RBAC (Role-Based Access Control) solution with JWT authentication, team management, and enterprise-ready security features.
 
 *"To watch over as a guard!"*
 
----
+## Features
 
-## 🔑 Key Features
+- **Multi-Tenant Architecture** - Isolated tenant organizations with teams and users
+- **JWT Authentication** - Secure token-based authentication with blacklist support
+- **Role-Based Access Control** - Admin/member roles with permission checks
+- **Password Security** - bcrypt hashing with complexity requirements
+- **Session Management** - Active session tracking with single-session enforcement (optional)
+- **Login Audit Logging** - Track all login attempts with IP addresses
+- **Password Reset** - Secure token-based password reset flow
+- **Email Verification** - Optional email confirmation for new users
+- **Rate Limiting** - Configurable per-user rate limiting
+- **CORS Support** - Configurable allowed origins
 
-- User registration
-- Password hashing (bcrypt)
-- JWT-based authentication
-- PostgreSQL support with database migrations
+## Tech Stack
 
----
+| Component | Technology |
+|-----------|------------|
+| Language | Go 1.23+ |
+| Web Framework | Gorilla Mux |
+| Database | PostgreSQL |
+| Authentication | JWT (HS256) |
+| Password Hashing | bcrypt |
 
-## 🚀 Getting Started
+## Quick Start
 
-To get the Sentinel server running, follow these steps:
+### Prerequisites
+
+- Go 1.23+
+- PostgreSQL
+- (Optional) Docker & Kubernetes for deployment
+
+### Environment Variables
 
 ```bash
-# Build the project
-make build
+# Required
+DATABASE_URL=postgres://user:password@localhost:5432/sentinel?sslmode=disable
+JWT_SECRET=your-secure-secret-key-min-32-chars
 
-# Or, to clean previous builds and build everything:
-make clean
+# Optional
+REQUIRE_EMAIL_VERIFICATION=false  # Set to "true" to require email verification
+SINGLE_SESSION=false              # Set to "true" to enforce single active session per user
+APP_BASE_URL=http://localhost:8080
+EMAIL_VERIFIED_REDIRECT_URL=      # URL to redirect after email verification
+CORS_ALLOWED_ORIGINS=             # Comma-separated list of allowed origins
+RATE_LIMIT=100                    # Requests per second
+BURST_LIMIT=300                   # Burst limit for rate limiting
+```
 
-# To run the server (after building)
+### Run Locally
+
+```bash
+# Clone the repository
+git clone https://github.com/your-org/sentinel.git
+cd sentinel
+
+# Set environment variables
+export DATABASE_URL="postgres://user:password@localhost:5432/sentinel?sslmode=disable"
+export JWT_SECRET="your-secure-secret-key-change-in-production"
+
+# Run the server
+go run cmd/server/main.go
+
+# Or build and run
+make run
+```
+
+### Using Kubernetes (Minikube)
+
+```bash
+# Start everything
 make all
+
+# Or step by step
+make up           # Start Minikube
+make build-image  # Build Docker image
+make postgres     # Deploy PostgreSQL
+make migrate      # Run database migrations
+make app          # Deploy Sentinel
+make port-forward # Forward port 8080
 ```
 
-**Note:** Ensure you have Go and PostgreSQL set up and configured as required by the project.
+## Database Schema
 
----
+Sentinel requires the following tables. Run the migration scripts in `k8s/base/` or create manually:
 
-## 📡 API Endpoints
+```sql
+-- Core tables
+CREATE TABLE tenants (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) UNIQUE NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
 
-### 🔍 Health Check
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    tenant_id INTEGER REFERENCES tenants(id),
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    role VARCHAR(50) DEFAULT 'member',
+    mobile VARCHAR(20),
+    email_confirmed BOOLEAN DEFAULT FALSE,
+    confirmation_token VARCHAR(255),
+    reset_token VARCHAR(255),
+    reset_token_expiry TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
 
-```bash
-curl -X GET http://localhost:8080/health
+CREATE TABLE teams (
+    id SERIAL PRIMARY KEY,
+    tenant_id INTEGER REFERENCES tenants(id),
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(tenant_id, name)
+);
+
+CREATE TABLE user_teams (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
+    role VARCHAR(50) DEFAULT 'member',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(user_id, team_id)
+);
+
+-- Session management
+CREATE TABLE token_blacklist (
+    id SERIAL PRIMARY KEY,
+    token TEXT UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE active_sessions (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    tenant_id INTEGER NOT NULL,
+    token TEXT NOT NULL,
+    last_ip VARCHAR(45),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(email, tenant_id)
+);
+
+-- Audit logging
+CREATE TABLE login_audit_logs (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    tenant_id INTEGER,
+    ip_address VARCHAR(45),
+    login_status VARCHAR(20) NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Optional: Module management
+CREATE TABLE modules (
+    id SERIAL PRIMARY KEY,
+    tenant_id INTEGER REFERENCES tenants(id),
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(tenant_id, name)
+);
 ```
 
-- **Description:** Checks the operational status of the Sentinel server.
-- **Method:** `GET`
-- **Endpoint:** `/health`
-- **Response:** `200 OK` if the server is running.
+## API Reference
 
----
+### Public Endpoints
 
-### 📝 User Registration
-
+#### Health Check
 ```bash
-curl -X POST http://localhost:8080/register \
--H "Content-Type: application/json" \
--d '{
+GET /health
+```
+
+#### Register
+```bash
+POST /register
+Content-Type: application/json
+
+{
   "name": "John Doe",
-  "email": "user3@example.com",
-  "password": "securepassword",
-  "tenant_name": "TenantName",
-  "tenant_desc": "Description of the firm",
-  "team_name": "Example Team",
-  "team_desc": "Description of the team",
-  "user_role": "admin",
-  "team_role": "admin"
-}'
+  "email": "john@example.com",
+  "password": "SecureP@ss123",
+  "tenant_name": "Acme Corp",
+  "tenant_desc": "Our organization",
+  "team_name": "Engineering",
+  "user_role": "admin"
+}
 ```
 
-- **Description:** Registers a new user. Optionally creates a tenant and team if they don't exist.
-- **Method:** `POST`
-- **Endpoint:** `/register`
-- **Headers:**
-  - `Content-Type: application/json`
-- **Request Body (JSON):**
-  ```json
-  {
-    "name": "John Doe",
-    "email": "user3@example.com",
-    "password": "securepassword",
-    "tenant_name": "TenantName",
-    "tenant_desc": "Description of the firm",
-    "team_name": "Example Team",
-    "team_desc": "Description of the team",
-    "user_role": "admin",
-    "team_role": "admin"
-  }
-  ```
-- **Response:** `201 Created`
-- **Response Example:**
-  ```json
-  {
-    "message": "User created successfully with tenant and team",
-    "team_id": 1,
-    "tenant_id": 1,
-    "user_id": 1
-  }
-  ```
-
----
-
-### 🔐 User Login
-
+#### Login
 ```bash
-curl -X POST http://localhost:8080/login \
--H "Content-Type: application/json" \
--d '{
-  "email": "user3@example.com",
-  "password": "securepassword",
-  "tenant_id": 1
-}'
+POST /login
+Content-Type: application/json
+
+{
+  "email": "john@example.com",
+  "password": "SecureP@ss123"
+}
+
+# Response
+{
+  "token": "eyJhbGciOiJIUzI1NiIs..."
+}
 ```
 
-- **Description:** Authenticates a user and returns a JWT.
-- **Method:** `POST`
-- **Endpoint:** `/login`
-- **Headers:**
-  - `Content-Type: application/json`
-- **Request Body (JSON):**
-  ```json
-  {
-    "email": "user3@example.com",
-    "password": "securepassword",
-    "tenant_id": 1
-  }
-  ```
-- **Response:** `200 OK`
-- **Response Example:**
-  ```json
-  {
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6InVzZXIzQGV4YW1wbGUuY29tIiwidGVuYW50X2lkIjoxLCJyb2xlIjoiYWRtaW4iLCJleHAiOjE3NDc0Nzc4NzB9.UD96ERyBSyjzHHMK9eUtmyaFSyvlFe1xxAzOjwbfUus"
-  }
-  ```
-  *(Note: Token will differ for each login.)*
-
----
-
-
-
-### 🚪 User Logout
-
+#### Logout
 ```bash
-curl -X POST http://localhost:8080/logout \
--H "Authorization: Bearer <your_jwt_token>" \
--H "Content-Type: application/json"
+POST /logout
+Authorization: Bearer <token>
 ```
 
-- **Description:** Logs out a user by invalidating their JWT.
-- **Method:** `POST`
-- **Endpoint:** `/logout`
-- **Headers:**
-  - `Authorization: Bearer <your_jwt_token>`
-  - `Content-Type: application/json`
-- **Response:** `200 OK`
-- **Response Example:**
-  ```json
-  {
-    "message": "User logged out successfully"
-  }
-  ```
-  *(Returns an appropriate error: `401 Unauthorized` if the JWT is missing, `500 Internal Server Error` for any other issue.)*
-
-### 👤 Get User Info
-
+#### Request Password Reset
 ```bash
-curl -X GET http://localhost:8080/api/user/{id} \
--H "Authorization: Bearer <your_jwt_token>" \
--H "Content-Type: application/json"
+POST /request-password-reset
+Content-Type: application/json
+
+{
+  "email": "john@example.com"
+}
 ```
 
-- **Description:** Retrieves detailed information about a specific user by ID. Requires JWT.
-- **Method:** `GET`
-- **Endpoint:** `/api/user/{id}`
-- **Headers:**
-  - `Authorization: Bearer <your_jwt_token>`
-  - `Content-Type: application/json`
-- **Response:** `200 OK`
-- **Response Example:**
-  ```json
-  {
-    "team_id": 1,
-    "team_name": "Example Team",
-    "tenant_id": 1,
-    "tenant_name": "TenantName",
-    "user_email": "user3@example.com",
-    "user_id": 1,
-    "user_name": "John Doe"
-  }
-  ```
-  *(Returns an appropriate error: `401 Unauthorized`, `404 Not Found` if the request fails.)*
-
----
-
-
-### 🏢 Get Users by Tenant (Admin Only)
-
-This endpoint retrieves a list of users associated with a specific tenant. Only users with the `admin` role are authorized to access this endpoint.
-
-- **Description:** Retrieves all users belonging to a specific tenant. Requires `admin` role and a valid JWT.
-- **Method:** `GET`
-- **Endpoint:** `/api/user/tenant/{tenant_id}`
-- **Headers:**
-  - `Authorization: Bearer <your_jwt_token>`
-  - `Content-Type: application/json`
-- **Path Parameters:**
-  - `tenant_id` (integer): The ID of the tenant whose users are to be retrieved.
-- **Response:** `200 OK`
-- **Response Example:**
-  ```json
-  [
-    {
-      "id": 1,
-      "tenant_id": 1,
-      "name": "John Doe",
-      "email": "user3@example.com",
-      "role": "admin",
-      "created_at": "2025-06-04T10:22:42.700791Z",
-      "updated_at": "2025-06-04T10:22:42.700791Z"
-    }
-  ]
-  ```
-  *(Returns an appropriate error: `401 Unauthorized`, `403 Forbidden`, `404 Not Found` if the request fails.)*
-
-
----
-### 🛠️ Update User Details (Admin Only)
-
+#### Reset Password
 ```bash
-curl -X PUT http://localhost:8080/api/user \
--H "Authorization: Bearer <your_jwt_token>" \
--H "Content-Type: application/json" \
--d '{
+POST /reset-password
+Content-Type: application/json
+
+{
+  "token": "reset-token-from-email",
+  "new_password": "NewSecureP@ss123"
+}
+```
+
+### Protected Endpoints (Require JWT)
+
+All `/api/*` endpoints require the `Authorization: Bearer <token>` header.
+
+#### Get Current User Info
+```bash
+GET /api/userinfo
+```
+
+#### Get User by ID
+```bash
+GET /api/user/{id}
+```
+
+#### Update User (Admin Only)
+```bash
+PUT /api/user
+Content-Type: application/json
+
+{
   "user_id": 1,
   "name": "Updated Name",
-  "email": "user3@example.com",
-  "password": "securepassword",
-  "tenant_name": "Updated Tenant 2",
-  "team_name": "Example Team 2",
   "role": "admin"
-}'
+}
 ```
 
-- **Description:** Updates the details of an existing user. Only users with the `admin` role are authorized to perform this action.
-- **Method:** `PUT`
-- **Endpoint:** `/api/user`
-- **Headers:**
-  - `Authorization: Bearer <your_jwt_token>`
-  - `Content-Type: application/json`
-- **Request Body (JSON):**
-  ```json
-  {
-    "user_id": 1,
-    "name": "Updated Name",
-    "email": "user3@example.com",
-    "password": "securepassword",
-    "tenant_name": "Updated Tenant 2",
-    "team_name": "Example Team 2",
-    "role": "admin"
-  }
-  ```
-  - `user_id` (integer): ID of the user whose details are to be updated (required).
-  - `name` (string): New name of the user (optional).
-  - `email` (string): New email address (optional).
-  - `password` (string): New password (optional).
-  - `tenant_name` (string): New tenant name (optional).
-  - `team_name` (string): New or existing team to associate the user with (optional).
-  - `role` (string): Role to assign (e.g., "admin", "member") (optional).
+#### Get Users by Tenant (Admin Only)
+```bash
+GET /api/user/tenant/{tenant_id}
+```
 
-- **Response:** `200 OK`
-- **Response Example:**
-  ```json
-  {
-    "message": "User details updated successfully"
-  }
-  ```
+#### Delete User (Admin Only)
+```bash
+DELETE /api/user/{id}
+```
 
-### 🧠 Business Logic
+#### Create User in Tenant (Admin Only)
+```bash
+POST /api/user
+Content-Type: application/json
 
-- **Authorization:** Ensures the request is made by an authenticated user using a valid JWT.
-- **Permission Check:** Only users with the `admin` role can update user information.
-- **User Info Update:**
-  - Updates the user's name, email, and password (hashed).
-- **Tenant Update:**
-  - Updates the tenant name if provided.
-- **Team Update:**
-  - Associates the user with a new or existing team under the same tenant.
-- **Role Update:**
-  - Updates the user's role if specified.
-- **Error Handling:**
-  - Returns `401 Unauthorized` if the JWT is invalid or missing.
-  - Returns `403 Forbidden` if the user lacks the required permissions.
-  - Returns `404 Not Found` if the user or associated entities are not found.
+{
+  "name": "Jane Doe",
+  "email": "jane@example.com",
+  "password": "SecureP@ss123",
+  "team_name": "Sales",
+  "user_role": "member"
+}
+```
 
+#### List Teams
+```bash
+GET /api/team
+```
+
+#### Create Team (Admin Only)
+```bash
+POST /api/team
+Content-Type: application/json
+
+{
+  "name": "Marketing",
+  "description": "Marketing team"
+}
+```
+
+#### Update Team (Admin Only)
+```bash
+PUT /api/team
+Content-Type: application/json
+
+{
+  "id": 1,
+  "name": "Updated Team Name",
+  "description": "Updated description"
+}
+```
+
+#### Delete Team (Admin Only)
+```bash
+DELETE /api/team/{id}
+```
+
+#### Get Modules
+```bash
+GET /api/modules
+```
+
+## Security Best Practices
+
+1. **JWT Secret**: Always set a strong `JWT_SECRET` in production (minimum 32 characters)
+2. **Database**: Use SSL connections in production (`sslmode=require`)
+3. **CORS**: Configure `CORS_ALLOWED_ORIGINS` to only allow your frontend domains
+4. **Rate Limiting**: Adjust `RATE_LIMIT` and `BURST_LIMIT` based on your needs
+5. **Email Verification**: Enable `REQUIRE_EMAIL_VERIFICATION=true` for production
+6. **Single Session**: Consider enabling `SINGLE_SESSION=true` for sensitive applications
+
+## Project Structure
+
+```
+sentinel/
+├── cmd/
+│   └── server/
+│       └── main.go          # Application entry point
+├── internal/
+│   ├── auth/
+│   │   ├── auth.go          # JWT generation and validation
+│   │   └── middleware.go    # Auth middleware, rate limiting, CORS
+│   ├── db/
+│   │   └── db.go            # Database connection
+│   ├── handlers/
+│   │   ├── login.go         # Login, password reset, email verification
+│   │   ├── logout.go        # Logout handler
+│   │   ├── users.go         # User CRUD operations
+│   │   └── team.go          # Team management
+│   └── models/
+│       └── user.go          # Data models
+├── k8s/                     # Kubernetes manifests
+├── go.mod
+├── go.sum
+├── Makefile
+└── README.md
+```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

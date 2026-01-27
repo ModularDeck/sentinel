@@ -3,10 +3,12 @@ package auth
 import (
 	"errors"
 	"log"
+	"os"
 	"sentinel/internal/db"
 	"time"
 
 	"github.com/golang-jwt/jwt"
+	"github.com/google/uuid"
 )
 
 // Claims struct to hold JWT claims
@@ -17,27 +19,33 @@ type Claims struct {
 	jwt.StandardClaims
 }
 
-const jwtKey string = "ikud1U6vzc8OhVoNw0vadTKt7MA20Vlk"
+// getJWTSecret retrieves the JWT secret from environment variables
+func getJWTSecret() string {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		log.Println("WARNING: JWT_SECRET not set, using default (not recommended for production)")
+		secret = "change-me-in-production-use-strong-secret"
+	}
+	return secret
+}
 
 // GenerateJWT creates a JWT for authenticated users
 func GenerateJWT(email string, tenantID int, role string) (string, error) {
-	expirationTime := time.Now().Add(24 * time.Hour)
-	log.Println("JWT Generation started. jwtkey")
+	now := time.Now()
+	expirationTime := now.Add(24 * time.Hour)
 	claims := &Claims{
 		Email:    email,
 		TenantID: tenantID,
 		Role:     role,
 		StandardClaims: jwt.StandardClaims{
 			ExpiresAt: expirationTime.Unix(),
+			IssuedAt:  now.Unix(),
+			Id:        uuid.New().String(), // Unique token ID for revocation tracking
 		},
 	}
-	log.Println(claims)
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	jwtKey := []byte(jwtKey)
-	log.Println("JWT Generation started. jwtkey")
-	log.Println(jwtKey)
-	tokenString, err := token.SignedString(jwtKey)
+	tokenString, err := token.SignedString([]byte(getJWTSecret()))
 	if err != nil {
 		return "", err
 	}
@@ -55,20 +63,17 @@ var isTokenBlacklisted = func(token string) (bool, error) {
 var ValidateToken = validateToken
 
 func validateToken(tokenStr string) (*Claims, error) {
-	log.Println("Starting JWT token validation...")
-
-	// Fetch JWT secret from environment variables
-	if jwtKey == "" {
-		log.Println("JWT secret not found in environment variables.")
+	jwtSecret := getJWTSecret()
+	if jwtSecret == "" {
+		log.Println("JWT secret not configured")
 		return nil, errors.New("JWT secret not found")
 	}
 
-	log.Println("JWT secret successfully loaded.")
 	claims := &Claims{}
 
 	// Parse the token with claims
 	token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
-		return []byte(jwtKey), nil
+		return []byte(jwtSecret), nil
 	})
 
 	if err != nil {
@@ -85,19 +90,29 @@ func validateToken(tokenStr string) (*Claims, error) {
 		return nil, errors.New("error validating token")
 	}
 
+	// Validate required claims
+	if claims.IssuedAt == 0 {
+		log.Println("Missing issued_at (iat) in token")
+		return nil, errors.New("token missing issued time")
+	}
+
+	if claims.Id == "" {
+		log.Println("Missing JWT ID (jti) in token")
+	}
+
 	// Check if the token is blacklisted
 	exists, err := isTokenBlacklisted(tokenStr)
 	if err != nil {
-		log.Println("Token blacklist check error.")
-		return nil, errors.New("token is expired")
+		log.Println("Token blacklist check error:", err)
+		return nil, errors.New("token validation failed")
 	}
 	if exists {
-		log.Println("Token in token_blacklist.")
-		return nil, errors.New("token is expired")
+		log.Println("Token is blacklisted")
+		return nil, errors.New("token is revoked")
 	}
 
 	if !token.Valid {
-		log.Println("Token is not valid.")
+		log.Println("Token is not valid")
 		return nil, errors.New("invalid token")
 	}
 	return claims, nil
