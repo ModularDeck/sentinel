@@ -186,7 +186,17 @@ func getUserLimiter(user string) *rate.Limiter {
 func RateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Skip rate limiting for public endpoints
-		publicPaths := []string{"/health", "/register", "/login", "/logout", "/request-password-reset", "/reset-password"}
+		publicPaths := []string{
+			"/health",
+			"/register",
+			"/login",
+			"/logout",
+			"/request-password-reset",
+			"/reset-password",
+			"/docs",
+			"/swagger",
+			"/swagger.yaml",
+		}
 		for _, path := range publicPaths {
 			if r.URL.Path == path {
 				next.ServeHTTP(w, r)
