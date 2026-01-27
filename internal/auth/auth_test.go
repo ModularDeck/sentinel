@@ -101,6 +101,7 @@ func TestValidateToken_Expired(t *testing.T) {
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	jwtKey := "secret"
 	tokenString, _ := token.SignedString([]byte(jwtKey))
 
 	// Mock blacklist check to always return false (not blacklisted)

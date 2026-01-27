@@ -42,6 +42,7 @@ type UserTeam struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// Req_User_Login represents the request body for user registration
 type Req_User_Login struct {
 	UserName     string `json:"name"`
 	Email        string `json:"email"`
@@ -52,19 +53,36 @@ type Req_User_Login struct {
 	TeamDesc     string `json:"team_desc,omitempty"`
 	UserTeamRole string `json:"team_role,omitempty"`
 	UserRole     string `json:"user_role,omitempty"`
+	Mobile       string `json:"mobile,omitempty"`
 }
 
-// // HashPassword hashes the user's password
-// func (u *User) HashPassword(password string) error {
-// 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	u.Password = string(hashedPassword)
-// 	return nil
-// }
+// Module represents a feature module that can be enabled/disabled per tenant
+type Module struct {
+	ID          int       `json:"id"`
+	TenantID    int       `json:"tenant_id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Active      bool      `json:"active"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
 
-// // CheckPassword compares the hashed password with the plain-text password
-// func (u *User) CheckPassword(password string) error {
-// 	return bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(password))
-// }
+// ActiveSession represents a user's active session
+type ActiveSession struct {
+	ID        int       `json:"id"`
+	Email     string    `json:"email"`
+	TenantID  int       `json:"tenant_id"`
+	Token     string    `json:"-"`
+	LastIP    string    `json:"last_ip"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// LoginAuditLog represents a record of login attempts
+type LoginAuditLog struct {
+	ID          int       `json:"id"`
+	Email       string    `json:"email"`
+	TenantID    *int      `json:"tenant_id,omitempty"`
+	IPAddress   string    `json:"ip_address"`
+	LoginStatus string    `json:"login_status"` // SUCCESS or FAILED
+	CreatedAt   time.Time `json:"created_at"`
+}

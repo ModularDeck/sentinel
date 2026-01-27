@@ -2,30 +2,168 @@ package handlers
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
+	"os"
+	"regexp"
 	"sentinel/internal/auth"
 	"sentinel/internal/db"
 	"sentinel/internal/models"
+	"strings"
 
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// RegisterUser handles user registration, along with tenant and team creation if needed
-func RegisterUser(w http.ResponseWriter, r *http.Request) {
+// validateEmail checks if the email format is valid
+func validateEmail(email string) bool {
+	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+	return emailRegex.MatchString(email)
+}
+
+// validatePassword checks if the password meets complexity requirements
+func validatePassword(password string) bool {
+	if len(password) < 8 {
+		return false
+	}
+	hasLower := regexp.MustCompile(`[a-z]`).MatchString(password)
+	hasUpper := regexp.MustCompile(`[A-Z]`).MatchString(password)
+	hasDigit := regexp.MustCompile(`\d`).MatchString(password)
+	hasSpecial := regexp.MustCompile(`[\W_]`).MatchString(password)
+	return hasLower && hasUpper && hasDigit && hasSpecial
+}
+
+// RegisterUserAgainstTenantId registers a new user under an existing tenant (admin only)
+func RegisterUserAgainstTenantId(w http.ResponseWriter, r *http.Request) {
 	var req models.Req_User_Login
 	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil || req.Email == "" || req.Password == "" || req.TenantName == "" {
+	if err != nil || req.Email == "" || req.Password == "" {
 		http.Error(w, "Invalid input", http.StatusBadRequest)
 		return
 	}
 
-	// Hash the password before storing
+	ctx := r.Context()
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+
+	if !validateEmail(req.Email) {
+		http.Error(w, "Invalid email format", http.StatusBadRequest)
+		return
+	}
+
+	if !validatePassword(req.Password) {
+		http.Error(w, "Password must be at least 8 characters with uppercase, lowercase, number, and special character", http.StatusBadRequest)
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Error hashing password", http.StatusInternalServerError)
+		return
+	}
+
+	tenantID, err := auth.GetTenantID(ctx)
+	if err != nil || tenantID == 0 {
+		log.Println("Missing tenant ID from token")
+		http.Error(w, "Missing tenant ID from token", http.StatusBadRequest)
+		return
+	}
+
+	if req.UserTeamRole == "" {
+		req.UserTeamRole = "member"
+	}
+
+	tx, err := db.DB.Begin()
+	if err != nil {
+		log.Println("Failed to start transaction:", err)
+		http.Error(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	var teamID int
+	err = tx.QueryRow(`
+		INSERT INTO teams (tenant_id, name, description, created_at, updated_at) 
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (tenant_id, name) 
+		DO UPDATE SET description = EXCLUDED.description, updated_at = EXCLUDED.updated_at
+		RETURNING id
+	`, tenantID, req.TeamName, req.TeamDesc, time.Now(), time.Now()).Scan(&teamID)
+	if err != nil {
+		http.Error(w, "Error creating or updating team", http.StatusInternalServerError)
+		return
+	}
+
+	if req.UserRole == "" {
+		req.UserRole = "member"
+	}
+
+	var userID int
+	err = tx.QueryRow(`
+		INSERT INTO users (tenant_id, name, email, password, role, created_at, updated_at) 
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (email) DO UPDATE SET password = EXCLUDED.password, updated_at = EXCLUDED.updated_at
+		RETURNING id
+	`, tenantID, req.UserName, req.Email, string(hashedPassword), req.UserRole, time.Now(), time.Now()).Scan(&userID)
+	if err != nil {
+		http.Error(w, "Error creating or updating user", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO user_teams (user_id, team_id, role, created_at, updated_at) 
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (user_id, team_id) DO UPDATE SET role = EXCLUDED.role, updated_at = EXCLUDED.updated_at
+	`, userID, teamID, req.UserTeamRole, time.Now(), time.Now())
+	if err != nil {
+		http.Error(w, "Error adding user to team", http.StatusInternalServerError)
+		return
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{
+		"message":   "User created successfully with tenant and team",
+		"user_id":   strconv.Itoa(userID),
+		"tenant_id": strconv.Itoa(tenantID),
+		"team_id":   strconv.Itoa(teamID),
+	})
+}
+
+// RegisterUser handles new user registration with tenant and team creation
+func RegisterUser(w http.ResponseWriter, r *http.Request) {
+	var req models.Req_User_Login
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil || req.Email == "" || req.Password == "" || req.TenantName == "" {
+		http.Error(w, "Invalid input: email, password, and tenant_name are required", http.StatusBadRequest)
+		return
+	}
+
+	// Validate and normalize email
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	if !validateEmail(req.Email) {
+		http.Error(w, "Invalid email format", http.StatusBadRequest)
+		return
+	}
+
+	// Validate password complexity
+	if !validatePassword(req.Password) {
+		http.Error(w, "Password must be at least 8 characters with uppercase, lowercase, number, and special character", http.StatusBadRequest)
+		return
+	}
+
+	// Hash the password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		http.Error(w, "Error hashing password", http.StatusInternalServerError)
@@ -46,36 +184,54 @@ func RegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	// Step 1: Create or get tenant
+	// Step 1: Create tenant (fail if exists)
 	var tenantID int
 	err = tx.QueryRow(`
 		INSERT INTO tenants (name, description, created_at, updated_at) 
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description, updated_at = EXCLUDED.updated_at
+		ON CONFLICT (name) DO NOTHING
 		RETURNING id
 	`, req.TenantName, req.TenantDesc, time.Now(), time.Now()).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		log.Printf("Tenant %s already exists", req.TenantName)
+		http.Error(w, "Tenant already exists, please use a different name", http.StatusConflict)
+		return
+	}
 	if err != nil {
-		http.Error(w, "Error creating or updating tenant", http.StatusInternalServerError)
+		http.Error(w, "Error creating tenant", http.StatusInternalServerError)
 		return
 	}
 
-	// Step 2: Create or get user
-	if req.UserRole == "" {
-		req.UserRole = "member" // default role if not provided
+	// Step 2: Check if user already exists
+	var existingUserID int
+	err = tx.QueryRow(`SELECT id FROM users WHERE email = $1`, req.Email).Scan(&existingUserID)
+	if err != sql.ErrNoRows {
+		if err == nil {
+			http.Error(w, "User with this email already exists", http.StatusConflict)
+			return
+		}
+		http.Error(w, "Error checking existing user", http.StatusInternalServerError)
+		return
 	}
+
+	// Step 3: Create user
+	if req.UserRole == "" {
+		req.UserRole = "admin" // First user is admin by default
+	}
+
 	var userID int
 	err = tx.QueryRow(`
-		INSERT INTO users (tenant_id, name, email, password, role, created_at, updated_at) 
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (email) DO UPDATE SET password = EXCLUDED.password, updated_at = EXCLUDED.updated_at
+		INSERT INTO users (tenant_id, name, email, password, role, created_at, updated_at, mobile) 
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id
-	`, tenantID, req.UserName, req.Email, string(hashedPassword), req.UserRole, time.Now(), time.Now()).Scan(&userID)
+	`, tenantID, req.UserName, req.Email, string(hashedPassword), req.UserRole, time.Now(), time.Now(), req.Mobile).Scan(&userID)
 	if err != nil {
-		http.Error(w, "Error creating or updating user", http.StatusInternalServerError)
+		log.Println("Error creating user:", err)
+		http.Error(w, "Error creating user", http.StatusInternalServerError)
 		return
 	}
 
-	// Step 3: Create or get team
+	// Step 4: Create default team
 	if req.TeamName == "" {
 		req.TeamName = req.TenantName + " Default Team"
 	}
@@ -92,13 +248,13 @@ func RegisterUser(w http.ResponseWriter, r *http.Request) {
 		RETURNING id
 	`, tenantID, req.TeamName, req.TeamDesc, time.Now(), time.Now()).Scan(&teamID)
 	if err != nil {
-		http.Error(w, "Error creating or updating team", http.StatusInternalServerError)
+		http.Error(w, "Error creating team", http.StatusInternalServerError)
 		return
 	}
 
-	// Step 4: Add user to team with default or provided role
+	// Step 5: Add user to team
 	if req.UserTeamRole == "" {
-		req.UserTeamRole = "member" // default role if not provided
+		req.UserTeamRole = "admin"
 	}
 
 	_, err = tx.Exec(`
@@ -111,6 +267,17 @@ func RegisterUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Step 6: Generate email confirmation token if email verification is enabled
+	var confirmationToken string
+	if os.Getenv("REQUIRE_EMAIL_VERIFICATION") == "true" {
+		confirmationToken = uuid.New().String()
+		_, err = tx.Exec(`UPDATE users SET confirmation_token = $1 WHERE id = $2`, confirmationToken, userID)
+		if err != nil {
+			http.Error(w, "Failed to set confirmation token", http.StatusInternalServerError)
+			return
+		}
+	}
+
 	// Commit the transaction
 	err = tx.Commit()
 	if err != nil {
@@ -118,6 +285,17 @@ func RegisterUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Log confirmation URL if email verification is enabled
+	if confirmationToken != "" {
+		baseURL := os.Getenv("APP_BASE_URL")
+		if baseURL == "" {
+			baseURL = "http://localhost:8080"
+		}
+		confirmURL := fmt.Sprintf("%s/webhooks/verify-email?token=%s", baseURL, confirmationToken)
+		log.Printf("Email confirmation URL for %s: %s", req.Email, confirmURL)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{
 		"message":   "User created successfully with tenant and team",
@@ -192,16 +370,18 @@ func GetUserDetails(w http.ResponseWriter, r *http.Request) {
 		teamNameVal   sql.NullString
 	)
 
+	var userRoleVal sql.NullString
+
 	err = db.DB.QueryRow(`
-		SELECT u.id, u.name, u.email, t.id, t.name, tm.id, tm.name
+		SELECT u.id, u.name, u.email, t.id, t.name, tm.id, tm.name, u.role
 		FROM users u
 		JOIN tenants t ON u.tenant_id = t.id
 		LEFT JOIN user_teams ut ON ut.user_id = u.id
 		LEFT JOIN teams tm ON tm.id = ut.team_id
-		WHERE u.id = $1 and u.tenant_id = $2 `, userID, ctxTenantID).Scan(
+		WHERE u.id = $1 and u.tenant_id = $2`, userID, ctxTenantID).Scan(
 		&userIDVal, &userNameVal, &userEmailVal,
 		&tenantIDVal, &tenantNameVal,
-		&teamIDVal, &teamNameVal,
+		&teamIDVal, &teamNameVal, &userRoleVal,
 	)
 
 	if err != nil {
@@ -230,6 +410,9 @@ func GetUserDetails(w http.ResponseWriter, r *http.Request) {
 	if teamNameVal.Valid {
 		team.Name = teamNameVal.String
 	}
+	if userRoleVal.Valid {
+		user.Role = userRoleVal.String
+	}
 
 	response := map[string]interface{}{
 		"user_id":     user.ID,
@@ -239,6 +422,7 @@ func GetUserDetails(w http.ResponseWriter, r *http.Request) {
 		"tenant_name": tenant.Name,
 		"team_id":     team.ID,
 		"team_name":   team.Name,
+		"role":        user.Role,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

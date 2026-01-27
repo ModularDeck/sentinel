@@ -128,8 +128,45 @@ func GetTeamsByTenantHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(teams)
-	w.WriteHeader(http.StatusOK)
-
 }
 
-// GetTeamDetailsHandler retrieves details of a specific team
+// ModuleStatus represents the status of a module for a tenant
+type ModuleStatus struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Active      bool   `json:"active"`
+}
+
+// GetModulesHandler retrieves the list of modules for the tenant
+func GetModulesHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	tenantId, _ := auth.GetTenantID(ctx)
+	if tenantId == 0 {
+		http.Error(w, "Tenant ID is required", http.StatusBadRequest)
+		return
+	}
+
+	rows, err := db.DB.Query(`
+		SELECT name, description, active 
+		FROM modules 
+		WHERE tenant_id = $1
+	`, tenantId)
+	if err != nil {
+		http.Error(w, "Failed to fetch modules", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var modules []ModuleStatus
+	for rows.Next() {
+		var mod ModuleStatus
+		if err := rows.Scan(&mod.Name, &mod.Description, &mod.Active); err != nil {
+			http.Error(w, "Failed to scan module", http.StatusInternalServerError)
+			return
+		}
+		modules = append(modules, mod)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(modules)
+}
