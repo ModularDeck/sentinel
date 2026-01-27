@@ -31,6 +31,11 @@ func main() {
 	// Health check endpoint
 	r.HandleFunc("/health", healthHandler).Methods("GET")
 
+	// Swagger documentation endpoints
+	r.HandleFunc("/docs", handlers.SwaggerUIHandler).Methods("GET")
+	r.HandleFunc("/swagger", handlers.SwaggerUIHandler).Methods("GET")
+	r.HandleFunc("/swagger.yaml", handlers.SwaggerSpecHandler).Methods("GET")
+
 	// Public routes (no authentication required)
 	r.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
 		handlers.LoginHandler(w, r, db.DB)
