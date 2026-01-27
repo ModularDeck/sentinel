@@ -1,0 +1,957 @@
+openapi: 3.0.3
+info:
+  title: Sentinel API
+  description: |
+    A modular, multi-tenant user management system with JWT authentication, 
+    role-based access control, and enterprise-ready security features.
+    
+    ## Authentication
+    Most endpoints require JWT authentication. Include the token in the Authorization header:
+    ```
+    Authorization: Bearer <your-jwt-token>
+    ```
+    
+    ## Multi-Tenancy
+    Users belong to tenants (organizations). The tenant context is extracted from the JWT token.
+    
+    ## Roles
+    - `admin` - Full access to tenant resources
+    - `member` - Limited access based on permissions
+  version: 1.0.0
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  contact:
+    name: ModularDeck
+    url: https://github.com/ModularDeck/ModSentinelDeck
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://api.yourdomain.com
+    description: Production server
+
+tags:
+  - name: Health
+    description: Health check endpoints
+  - name: Authentication
+    description: Login, logout, and registration
+  - name: Password
+    description: Password reset operations
+  - name: Email Verification
+    description: Email verification endpoints
+  - name: Users
+    description: User management operations
+  - name: Teams
+    description: Team management operations
+  - name: Modules
+    description: Feature module management
+
+paths:
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: Check if the server is running
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: OK
+
+  /register:
+    post:
+      tags:
+        - Authentication
+      summary: Register a new user and tenant
+      description: |
+        Creates a new tenant, user, and default team. The first user of a tenant 
+        is automatically assigned the `admin` role.
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              name: John Doe
+              email: john@example.com
+              password: SecureP@ss123
+              tenant_name: Acme Corp
+              tenant_desc: Our awesome company
+              team_name: Engineering
+              team_desc: Engineering team
+              user_role: admin
+              mobile: "+1234567890"
+      responses:
+        '201':
+          description: User registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+        '400':
+          description: Invalid input or validation error
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Password must be at least 8 characters with uppercase, lowercase, number, and special character
+        '409':
+          description: Tenant or user already exists
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Tenant already exists, please use a different name
+
+  /login:
+    post:
+      tags:
+        - Authentication
+      summary: Login and get JWT token
+      description: |
+        Authenticates a user and returns a JWT token. The token is also set as a cookie.
+        Login attempts are logged for audit purposes.
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: john@example.com
+              password: SecureP@ss123
+      responses:
+        '200':
+          description: Login successful
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: token=eyJhbGc...; Path=/; HttpOnly
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: Invalid credentials
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid username or password
+
+  /logout:
+    post:
+      tags:
+        - Authentication
+      summary: Logout and invalidate token
+      description: |
+        Logs out the user by adding the token to the blacklist and removing 
+        the active session. The token cookie is also cleared.
+      operationId: logout
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Logout successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Logged out successfully
+        '401':
+          description: Invalid or missing token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Authorization token not found
+
+  /request-password-reset:
+    post:
+      tags:
+        - Password
+      summary: Request password reset
+      description: |
+        Initiates a password reset by generating a reset token. In production, 
+        this token should be sent via email. The token expires in 30 minutes.
+      operationId: requestPasswordReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+              properties:
+                email:
+                  type: string
+                  format: email
+            example:
+              email: john@example.com
+      responses:
+        '200':
+          description: Reset request processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: If the email exists, a reset link will be sent.
+
+  /reset-password:
+    post:
+      tags:
+        - Password
+      summary: Reset password with token
+      description: Resets the user's password using a valid reset token.
+      operationId: resetPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - token
+                - new_password
+              properties:
+                token:
+                  type: string
+                  description: Reset token received via email
+                new_password:
+                  type: string
+                  minLength: 8
+                  description: New password (min 8 chars)
+            example:
+              token: abc123def456...
+              new_password: NewSecureP@ss123
+      responses:
+        '200':
+          description: Password reset successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Password reset successful
+        '400':
+          description: Invalid or expired token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Token is invalid or expired
+
+  /webhooks/verify-email:
+    get:
+      tags:
+        - Email Verification
+      summary: Verify email address
+      description: |
+        Verifies a user's email address using the confirmation token. 
+        If `EMAIL_VERIFIED_REDIRECT_URL` is set, redirects to that URL.
+      operationId: verifyEmail
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Email confirmation token
+      responses:
+        '200':
+          description: Email verified successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Email verified successfully
+        '303':
+          description: Redirect to configured URL after verification
+        '400':
+          description: Invalid or expired token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid or expired token
+
+  /webhooks/resend-email:
+    post:
+      tags:
+        - Email Verification
+      summary: Resend verification email
+      description: Generates a new confirmation token and resends the verification email.
+      operationId: resendVerificationEmail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+              properties:
+                email:
+                  type: string
+                  format: email
+            example:
+              email: john@example.com
+      responses:
+        '200':
+          description: Verification email sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Verification email sent successfully
+        '400':
+          description: Email already verified
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Email already verified
+        '404':
+          description: User not found
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: User not found
+
+  /api/userinfo:
+    get:
+      tags:
+        - Users
+      summary: Get current user info
+      description: Returns information about the currently authenticated user.
+      operationId: getCurrentUser
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfoResponse'
+        '401':
+          description: Unauthorized
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid or expired token
+
+  /api/user/{id}:
+    get:
+      tags:
+        - Users
+      summary: Get user by ID
+      description: Returns information about a specific user within the same tenant.
+      operationId: getUserById
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: User ID
+      responses:
+        '200':
+          description: User information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfoResponse'
+        '400':
+          description: Invalid user ID
+        '401':
+          description: Unauthorized
+        '500':
+          description: Error fetching user details
+
+    delete:
+      tags:
+        - Users
+      summary: Delete user
+      description: Deletes a user from the tenant. Requires admin role.
+      operationId: deleteUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: User ID to delete
+      responses:
+        '200':
+          description: User deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: User deleted successfully
+        '400':
+          description: Invalid user ID
+        '403':
+          description: Forbidden - requires admin role
+        '500':
+          description: Error deleting user
+
+  /api/user:
+    post:
+      tags:
+        - Users
+      summary: Create user in tenant
+      description: |
+        Creates a new user within the current tenant. Requires admin role.
+        The tenant ID is extracted from the JWT token.
+      operationId: createUserInTenant
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+            example:
+              name: Jane Doe
+              email: jane@example.com
+              password: SecureP@ss123
+              team_name: Sales
+              team_desc: Sales team
+              user_role: member
+              team_role: member
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+        '400':
+          description: Invalid input or validation error
+        '401':
+          description: Unauthorized
+
+    put:
+      tags:
+        - Users
+      summary: Update user details
+      description: Updates user information. Requires admin role.
+      operationId: updateUser
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+            example:
+              user_id: 1
+              name: John Updated
+              email: john.updated@example.com
+              role: admin
+              team_name: New Team
+      responses:
+        '200':
+          description: User updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: User details updated successfully
+        '400':
+          description: Invalid request
+        '401':
+          description: Unauthorized
+        '404':
+          description: User not found
+
+  /api/user/tenant/{tenant_id}:
+    get:
+      tags:
+        - Users
+      summary: Get users by tenant
+      description: |
+        Returns all users belonging to a specific tenant. 
+        Requires admin role and must be the same tenant as the requesting user.
+      operationId: getUsersByTenant
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Tenant ID
+      responses:
+        '200':
+          description: List of users with tenant information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantUsersResponse'
+        '400':
+          description: Invalid tenant ID
+        '401':
+          description: Unauthorized to access this tenant's users
+        '404':
+          description: User not found
+
+  /api/team:
+    get:
+      tags:
+        - Teams
+      summary: Get all teams
+      description: Returns all teams for the current tenant. Requires admin role.
+      operationId: getTeams
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of teams
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Team'
+        '403':
+          description: Forbidden - requires admin role
+        '500':
+          description: Error retrieving teams
+
+    post:
+      tags:
+        - Teams
+      summary: Create a new team
+      description: Creates a new team in the current tenant. Requires admin role.
+      operationId: createTeam
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTeamRequest'
+            example:
+              name: Marketing
+              description: Marketing team
+      responses:
+        '201':
+          description: Team created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Team created successfully
+        '400':
+          description: Invalid input
+        '403':
+          description: Forbidden - requires admin role
+        '500':
+          description: Error creating team
+
+    put:
+      tags:
+        - Teams
+      summary: Update a team
+      description: Updates an existing team. Requires admin role.
+      operationId: updateTeam
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTeamRequest'
+            example:
+              id: 1
+              name: Updated Marketing
+              description: Updated marketing team description
+      responses:
+        '202':
+          description: Team updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Team updated successfully
+        '400':
+          description: Invalid input
+        '403':
+          description: Forbidden - requires admin role
+        '500':
+          description: Error updating team
+
+  /api/team/{id}:
+    delete:
+      tags:
+        - Teams
+      summary: Delete a team
+      description: |
+        Deletes a team and removes all user associations. Requires admin role.
+      operationId: deleteTeam
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Team ID to delete
+      responses:
+        '200':
+          description: Team deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Team deleted successfully
+        '400':
+          description: Invalid team ID
+        '403':
+          description: Forbidden - requires admin role
+        '500':
+          description: Error deleting team
+
+  /api/modules:
+    get:
+      tags:
+        - Modules
+      summary: Get tenant modules
+      description: |
+        Returns the list of feature modules available for the tenant, 
+        along with their active/inactive status.
+      operationId: getModules
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of modules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Module'
+              example:
+                - name: dashboard
+                  description: Dashboard module
+                  active: true
+                - name: reports
+                  description: Reporting module
+                  active: false
+        '400':
+          description: Tenant ID is required
+        '500':
+          description: Failed to fetch modules
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from /login endpoint
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required:
+        - name
+        - email
+        - password
+        - tenant_name
+      properties:
+        name:
+          type: string
+          description: User's full name
+        email:
+          type: string
+          format: email
+          description: User's email address
+        password:
+          type: string
+          minLength: 8
+          description: Password (min 8 chars, must include uppercase, lowercase, number, special char)
+        tenant_name:
+          type: string
+          description: Organization/tenant name
+        tenant_desc:
+          type: string
+          description: Organization description
+        team_name:
+          type: string
+          description: Initial team name (optional)
+        team_desc:
+          type: string
+          description: Team description (optional)
+        user_role:
+          type: string
+          enum: [admin, member]
+          default: admin
+          description: User's role in the tenant
+        team_role:
+          type: string
+          enum: [admin, member]
+          default: admin
+          description: User's role in the team
+        mobile:
+          type: string
+          description: Mobile phone number (optional)
+
+    RegisterResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: User created successfully with tenant and team
+        user_id:
+          type: string
+          example: "1"
+        tenant_id:
+          type: string
+          example: "1"
+        team_id:
+          type: string
+          example: "1"
+
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: JWT token for authentication
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+    UserInfoResponse:
+      type: object
+      properties:
+        user_id:
+          type: integer
+          example: 1
+        user_name:
+          type: string
+          example: John Doe
+        user_email:
+          type: string
+          example: john@example.com
+        tenant_id:
+          type: integer
+          example: 1
+        tenant_name:
+          type: string
+          example: Acme Corp
+        team_id:
+          type: integer
+          example: 1
+        team_name:
+          type: string
+          example: Engineering
+        role:
+          type: string
+          example: admin
+
+    CreateUserRequest:
+      type: object
+      required:
+        - name
+        - email
+        - password
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        team_name:
+          type: string
+        team_desc:
+          type: string
+        user_role:
+          type: string
+          enum: [admin, member]
+          default: member
+        team_role:
+          type: string
+          enum: [admin, member]
+          default: member
+
+    UpdateUserRequest:
+      type: object
+      required:
+        - user_id
+      properties:
+        user_id:
+          type: integer
+          description: ID of user to update
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        tenant_name:
+          type: string
+        team_name:
+          type: string
+        role:
+          type: string
+          enum: [admin, member]
+
+    TenantUsersResponse:
+      type: object
+      properties:
+        tenant:
+          type: object
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            description:
+              type: string
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        tenant_id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+        team:
+          $ref: '#/components/schemas/Team'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Team:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+        tenant_id:
+          type: integer
+
+    CreateTeamRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+
+    UpdateTeamRequest:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+
+    Module:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Module identifier
+        description:
+          type: string
+          description: Module description
+        active:
+          type: boolean
+          description: Whether the module is enabled for this tenant
